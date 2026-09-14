@@ -338,7 +338,7 @@ HTML = r'''<!doctype html>
       <button id="importBtn">导入标注 JSON</button>
       <input id="importFile" type="file" accept="application/json" hidden>
       <button id="clearBtn" class="danger">清空人工标注</button>
-      <div class="hint">自动轮廓属于底图；白色可行区可覆盖错误黑线。JSON 可配合同一张原图继续编辑。</div>
+      <div class="hint">点击导出时会同时保存本地工程；下次用同一张原图启动后自动恢复。JSON 导入保留为换电脑或恢复历史版本使用。</div>
     </div>
   </aside>
   <main class="workspace">
@@ -417,10 +417,11 @@ HTML = r'''<!doctype html>
   function buildingIntersectsCrop(item,c){const b=buildingBounds(item);return b.x+b.width>=c.x&&b.x<=c.x+c.width&&b.y+b.height>=c.y&&b.y<=c.y+c.height;}
   function exportedAnnotations(c){if(!c)return clone(state.annotations);return {freeRects:state.annotations.freeRects.map(r=>clipRect(r,c)).filter(Boolean),obstacleRects:state.annotations.obstacleRects.map(r=>clipRect(r,c)).filter(Boolean),obstacleLines:state.annotations.obstacleLines.map(r=>clipLine(r,c)).filter(Boolean),buildingCopies:state.annotations.buildingCopies.filter(item=>buildingIntersectsCrop(item,c)).map(item=>({...clone(item),x:item.x-c.x,y:item.y-c.y}))};}
   function download(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}
-  async function exportAll(){try{await preloadBuildingPatches();}catch(err){alert('导出失败：'+err.message);return;}const c=state.cropRect||{x:0,y:0,width:state.config.width,height:state.config.height};const full=document.createElement('canvas');full.width=state.config.width;full.height=state.config.height;const fctx=full.getContext('2d');const old=state.showOriginal;state.showOriginal=false;drawScene(fctx,0,0,false);state.showOriginal=old;const out=document.createElement('canvas');out.width=c.width;out.height=c.height;const octx=out.getContext('2d');octx.imageSmoothingEnabled=false;octx.drawImage(full,c.x,c.y,c.width,c.height,0,0,c.width,c.height);const data={version:'gaode-binary-map-editor-v2',exportedAt:new Date().toISOString(),source:{name:state.config.sourceName,width:state.config.width,height:state.config.height},preprocessing:state.config.report,project:{cropRect:clone(state.cropRect),annotations:clone(state.annotations)},exported:{width:c.width,height:c.height,offsetX:c.x,offsetY:c.y,annotations:exportedAnnotations(c)}};const stem=state.config.stem;out.toBlob(blob=>{download(blob,stem+'_binary.png');setTimeout(()=>download(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),stem+'_annotations.json'),250);toast('已导出 PNG 和 JSON');},'image/png');}
+  async function saveLocalProject(data){const response=await fetch('/project.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!response.ok){let message='HTTP '+response.status;try{message=(await response.json()).error||message;}catch{}throw new Error(message);}}
+  async function exportAll(){try{await preloadBuildingPatches();}catch(err){alert('导出失败：'+err.message);return;}const c=state.cropRect||{x:0,y:0,width:state.config.width,height:state.config.height};const full=document.createElement('canvas');full.width=state.config.width;full.height=state.config.height;const fctx=full.getContext('2d');const old=state.showOriginal;state.showOriginal=false;drawScene(fctx,0,0,false);state.showOriginal=old;const out=document.createElement('canvas');out.width=c.width;out.height=c.height;const octx=out.getContext('2d');octx.imageSmoothingEnabled=false;octx.drawImage(full,c.x,c.y,c.width,c.height,0,0,c.width,c.height);const data={version:'gaode-binary-map-editor-v2',exportedAt:new Date().toISOString(),source:{name:state.config.sourceName,width:state.config.width,height:state.config.height},preprocessing:state.config.report,project:{cropRect:clone(state.cropRect),annotations:clone(state.annotations)},exported:{width:c.width,height:c.height,offsetX:c.x,offsetY:c.y,annotations:exportedAnnotations(c)}};try{await saveLocalProject(data);}catch(err){alert('导出前保存本地工程失败：'+err.message);return;}const stem=state.config.stem;out.toBlob(blob=>{download(blob,stem+'_binary.png');setTimeout(()=>download(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),stem+'_annotations.json'),250);toast('已导出并保存本地工程');},'image/png');}
   async function importJson(file){try{const data=JSON.parse(await file.text());if(data.source&&((Number(data.source.width)!==state.config.width)||(Number(data.source.height)!==state.config.height)))throw new Error('JSON 的原图尺寸与当前图片不一致');const annotations=data.project?.annotations||data.annotations;if(!annotations)throw new Error('JSON 中没有可编辑标注');pushUndo();state.annotations={freeRects:Array.isArray(annotations.freeRects)?annotations.freeRects:[],obstacleRects:Array.isArray(annotations.obstacleRects)?annotations.obstacleRects:[],obstacleLines:Array.isArray(annotations.obstacleLines)?annotations.obstacleLines:[],buildingCopies:Array.isArray(annotations.buildingCopies)?annotations.buildingCopies:[]};state.cropRect=data.project?.cropRect||data.cropRect||null;state.order=Math.max(0,...allItems().map(x=>Number(x.item.drawOrder)||0));state.selected=null;await preloadBuildingPatches();updateUI();toast('标注 JSON 已导入');}catch(err){alert('导入失败：'+err.message);}}
   function loadImage(src){return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error('图片加载失败'));image.src=src+'?v='+Date.now();});}
-  async function init(){state.config=await fetch('/config.json').then(r=>r.json());[state.base,state.original]=await Promise.all([loadImage('/base.png'),loadImage('/original.png')]);state.baseCanvas=document.createElement('canvas');state.baseCanvas.width=state.config.width;state.baseCanvas.height=state.config.height;const bctx=state.baseCanvas.getContext('2d',{willReadFrequently:true});bctx.imageSmoothingEnabled=false;bctx.drawImage(state.base,0,0);$('sourceText').textContent=`${state.config.sourceName} · ${state.config.width}×${state.config.height}px · 自动轮廓 ${state.config.report.contour_count} 条`;$('lineWidth').value=state.config.defaultLineWidth;resize();fit();updateUI();}
+  async function init(){state.config=await fetch('/config.json').then(r=>r.json());[state.base,state.original]=await Promise.all([loadImage('/base.png'),loadImage('/original.png')]);state.baseCanvas=document.createElement('canvas');state.baseCanvas.width=state.config.width;state.baseCanvas.height=state.config.height;const bctx=state.baseCanvas.getContext('2d',{willReadFrequently:true});bctx.imageSmoothingEnabled=false;bctx.drawImage(state.base,0,0);$('sourceText').textContent=`${state.config.sourceName} · ${state.config.width}×${state.config.height}px · 自动轮廓 ${state.config.report.contour_count} 条`;$('lineWidth').value=state.config.defaultLineWidth;const saved=await fetch('/project.json',{cache:'no-store'}).then(r=>r.ok?r.json():null);if(saved?.project?.annotations&&Number(saved.source?.width)===state.config.width&&Number(saved.source?.height)===state.config.height){const annotations=saved.project.annotations;state.annotations={freeRects:Array.isArray(annotations.freeRects)?annotations.freeRects:[],obstacleRects:Array.isArray(annotations.obstacleRects)?annotations.obstacleRects:[],obstacleLines:Array.isArray(annotations.obstacleLines)?annotations.obstacleLines:[],buildingCopies:Array.isArray(annotations.buildingCopies)?annotations.buildingCopies:[]};state.cropRect=saved.project.cropRect||null;state.order=Math.max(0,...allItems().map(x=>Number(x.item.drawOrder)||0));await preloadBuildingPatches();toast('已自动恢复上次导出的工程');}resize();fit();updateUI();}
   document.querySelectorAll('[data-tool]').forEach(b=>b.addEventListener('click',()=>setTool(b.dataset.tool)));
   canvas.addEventListener('pointerdown',pointerDown);canvas.addEventListener('pointermove',pointerMove);canvas.addEventListener('pointerup',pointerUp);canvas.addEventListener('pointercancel',pointerUp);
   canvas.addEventListener('wheel',e=>{e.preventDefault();const box=canvas.getBoundingClientRect(),sx=e.clientX-box.left,sy=e.clientY-box.top,anchor=imagePoint(e),rotated=rotatedPoint(anchor),factor=Math.exp(-e.deltaY*.0012),next=clamp(state.zoom*factor,.05,12);state.panX=sx-rotated.x*next;state.panY=sy-rotated.y*next;state.zoom=next;updateUI();},{passive:false});
@@ -446,6 +447,8 @@ class EditorHandler(BaseHTTPRequestHandler):
     base_png = b""
     original_png = b""
     config_json = b"{}"
+    config: dict[str, object] = {}
+    project_path: Path | None = None
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
@@ -457,8 +460,55 @@ class EditorHandler(BaseHTTPRequestHandler):
             self.send_content(self.original_png, "image/png", cache=False)
         elif path == "/config.json":
             self.send_content(self.config_json, "application/json; charset=utf-8", cache=False)
+        elif path == "/project.json":
+            content = b"null"
+            if self.project_path is not None and self.project_path.is_file():
+                content = self.project_path.read_bytes()
+            self.send_content(content, "application/json; charset=utf-8", cache=False)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path != "/project.json" or self.project_path is None:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > 50 * 1024 * 1024:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        try:
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("工程文件格式无效")
+            source = data.get("source", {})
+            if (
+                int(source.get("width", -1)) != int(self.config["width"])
+                or int(source.get("height", -1)) != int(self.config["height"])
+                or not isinstance(data.get("project", {}).get("annotations"), dict)
+            ):
+                raise ValueError("工程文件与当前原图不匹配")
+            self.project_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.project_path.with_suffix(self.project_path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(temporary, self.project_path)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            response = json.dumps(
+                {"ok": False, "error": str(error)}, ensure_ascii=False
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.BAD_REQUEST)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(response)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(response)
+            return
+        self.send_content(b'{"ok":true}', "application/json; charset=utf-8", cache=False)
 
     def send_content(self, content: bytes, mime: str, cache: bool = True) -> None:
         self.send_response(HTTPStatus.OK)
@@ -489,6 +539,7 @@ def serve_editor(
     binary_rgb: np.ndarray,
     report: ConversionReport,
     source: Path,
+    project_path: Path,
     port: int,
     open_browser: bool,
 ) -> None:
@@ -502,7 +553,9 @@ def serve_editor(
         "defaultLineWidth": 5,
         "report": asdict(report),
     }
+    EditorHandler.config = config
     EditorHandler.config_json = json.dumps(config, ensure_ascii=False).encode("utf-8")
+    EditorHandler.project_path = project_path
     selected_port = available_port(port)
     server = ThreadingHTTPServer(("127.0.0.1", selected_port), EditorHandler)
     url = f"http://127.0.0.1:{selected_port}/"
@@ -533,8 +586,9 @@ def main() -> int:
     output_dir = Path(args.output_dir).expanduser()
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
+    resolved_output_dir = output_dir.resolve()
     base_path, report_path = write_initial_outputs(
-        output_dir.resolve(), source.stem, binary_rgb, report
+        resolved_output_dir, source.stem, binary_rgb, report
     )
     print(f"初始二值底图：{base_path}")
     print(f"转换报告：{report_path}")
@@ -545,6 +599,7 @@ def main() -> int:
         binary_rgb,
         report,
         source,
+        resolved_output_dir / f"{source.stem}_editor_project.json",
         args.port,
         open_browser=not args.no_browser,
     )
