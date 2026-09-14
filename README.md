@@ -15,7 +15,7 @@
 - 编辑视图可每次顺时针旋转 90°，不改变原始坐标和导出方向。
 - “查看原图”是纯预览模式，会暂时隐藏全部人工标注并阻止误编辑；缩放和平移仍可使用。
 - 支持选择、移动、撤销、重做、缩放、平移和裁剪保留框。
-- 导出最终 PNG 和可重新导入的标注 JSON。
+- 导出严格黑白二值 PNG 和可重新导入的标注 JSON。
 - 点击导出时自动保存本地工程；下次用同一张原图启动时自动恢复。
 - 全程在本机处理，不上传地图。
 
@@ -35,6 +35,16 @@ python3 -m venv .venv
 ```
 
 脚本会生成初始底图并自动打开本地编辑网页。关闭终端中的脚本即可停止网页服务。
+
+## 已发布地图
+
+当前公开的人工确认版本：[`dushiyuan-1`](communities/dushiyuan-1/README.md)。
+
+- [`map.png`](communities/dushiyuan-1/maps/final/map.png)：可直接查看的最新二值地图。
+- [`annotations.json`](communities/dushiyuan-1/maps/final/annotations.json)：可继续编辑的完整标注工程。
+- [`source.jpeg`](communities/dushiyuan-1/raw_inputs/source.jpeg)：继续编辑时必须使用的原始截图。
+
+`final/` 始终表示当前人工确认版本。以后更新同一小区时覆盖其中的同名文件并人工提交 Git；Git 历史仍可用于查看或恢复旧版本。
 
 只转换图片、不启动网页：
 
