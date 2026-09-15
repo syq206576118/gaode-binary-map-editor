@@ -306,7 +306,7 @@ HTML = r'''<!doctype html>
     <div class="section">
       <div class="section-title">全局路线验证</div>
       <label for="routeClearance">障碍安全边距（像素）</label>
-      <input id="routeClearance" type="number" min="0" max="50" step="1" value="3">
+      <input id="routeClearance" type="number" min="0" max="50" step="1" value="0">
       <button id="clearRouteBtn" style="width:100%;margin-top:7px">清除路线验证</button>
       <div class="crop-note" id="routeStatus">点击“验证全局路线”，再依次点击起点和终点。</div>
       <div class="hint">使用当前实时二值地图；白色可通行、黑色为障碍。成功只表示本次起终点连通。</div>
