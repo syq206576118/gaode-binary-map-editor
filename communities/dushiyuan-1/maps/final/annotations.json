@@ -1,6 +1,6 @@
 {
   "version": "gaode-binary-map-editor-v2",
-  "exportedAt": "2026-09-14T15:43:05.357Z",
+  "exportedAt": "2026-09-16T06:42:42.493Z",
   "source": {
     "name": "小区高德地图.jpeg",
     "width": 2192,
@@ -308,6 +308,24 @@
           "width": 13,
           "height": 18,
           "drawOrder": 124
+        },
+        {
+          "id": "free_mu3qgza7_9cq7g",
+          "name": "可行区 33",
+          "x": 2063,
+          "y": 592,
+          "width": 20,
+          "height": 56,
+          "drawOrder": 132
+        },
+        {
+          "id": "free_mu3qh1bs_db1z2",
+          "name": "可行区 34",
+          "x": 1731,
+          "y": 592,
+          "width": 40,
+          "height": 23,
+          "drawOrder": 133
         }
       ],
       "obstacleRects": [],
@@ -1171,6 +1189,16 @@
           "y2": 1239,
           "widthPx": 5,
           "drawOrder": 131
+        },
+        {
+          "id": "line_mu3qhbgn_15z15",
+          "name": "障碍线 87",
+          "x1": 2050,
+          "y1": 757,
+          "x2": 2050,
+          "y2": 799,
+          "widthPx": 5,
+          "drawOrder": 134
         }
       ],
       "buildingCopies": [
@@ -2363,6 +2391,24 @@
           "width": 13,
           "height": 18,
           "drawOrder": 124
+        },
+        {
+          "id": "free_mu3qgza7_9cq7g",
+          "name": "可行区 33",
+          "x": 2063,
+          "y": 592,
+          "width": 20,
+          "height": 56,
+          "drawOrder": 132
+        },
+        {
+          "id": "free_mu3qh1bs_db1z2",
+          "name": "可行区 34",
+          "x": 1731,
+          "y": 592,
+          "width": 40,
+          "height": 23,
+          "drawOrder": 133
         }
       ],
       "obstacleRects": [],
@@ -3226,6 +3272,16 @@
           "y2": 1239,
           "widthPx": 5,
           "drawOrder": 131
+        },
+        {
+          "id": "line_mu3qhbgn_15z15",
+          "name": "障碍线 87",
+          "x1": 2050,
+          "y1": 757,
+          "x2": 2050,
+          "y2": 799,
+          "widthPx": 5,
+          "drawOrder": 134
         }
       ],
       "buildingCopies": [
