@@ -588,7 +588,7 @@ class EditorHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            self.send_content(self.html, "text/html; charset=utf-8")
+            self.send_content(self.html, "text/html; charset=utf-8", cache=False)
         elif path == "/base.png":
             self.send_content(self.base_png, "image/png", cache=False)
         elif path == "/original.png":
