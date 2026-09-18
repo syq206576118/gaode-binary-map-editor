@@ -13,7 +13,7 @@ import os
 import socket
 import threading
 import webbrowser
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -36,13 +36,6 @@ class ConversionReport:
     filled_small_holes: int
     contour_count: int
     input_was_binary: bool
-    protected_axis_segments: list[dict[str, object]] = field(default_factory=list)
-    boundary_regression: dict[str, object] = field(default_factory=dict)
-
-
-AXIS_ANGLE_TOLERANCE_DEG = 2.0
-AXIS_GAP_LIMIT_PX = 8
-MAX_AXIS_CORRECTION_PX = 32
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,151 +181,6 @@ def gaode_green_mask(rgb: np.ndarray, tolerance: int) -> tuple[np.ndarray, int]:
     return mask, filled
 
 
-def _axis_orientation(dx: float, dy: float) -> str | None:
-    """Return an axis only when a segment is within the protected 2 degree cone."""
-    tangent = float(np.tan(np.deg2rad(AXIS_ANGLE_TOLERANCE_DEG)))
-    if abs(dx) >= abs(dy) and abs(dy) <= tangent * max(abs(dx), 1.0):
-        return "horizontal"
-    if abs(dy) > abs(dx) and abs(dx) <= tangent * max(abs(dy), 1.0):
-        return "vertical"
-    return None
-
-
-def _merge_axis_segments(
-    segments: list[dict[str, object]], boundary_width: int
-) -> list[dict[str, object]]:
-    """Merge collinear protected pieces and bridge at most eight missing pixels."""
-    merged: list[dict[str, object]] = []
-    coordinate_tolerance = max(2, boundary_width)
-    for orientation in ("horizontal", "vertical"):
-        candidates = [item.copy() for item in segments if item["orientation"] == orientation]
-        if orientation == "horizontal":
-            candidates.sort(key=lambda item: (int(item["y1"]), int(item["x1"])))
-        else:
-            candidates.sort(key=lambda item: (int(item["x1"]), int(item["y1"])))
-        for item in candidates:
-            start = int(item["x1"] if orientation == "horizontal" else item["y1"])
-            end = int(item["x2"] if orientation == "horizontal" else item["y2"])
-            coordinate = int(item["y1"] if orientation == "horizontal" else item["x1"])
-            match: dict[str, object] | None = None
-            for current in reversed(merged):
-                if current["orientation"] != orientation:
-                    continue
-                current_coordinate = int(
-                    current["y1"] if orientation == "horizontal" else current["x1"]
-                )
-                current_start = int(
-                    current["x1"] if orientation == "horizontal" else current["y1"]
-                )
-                current_end = int(
-                    current["x2"] if orientation == "horizontal" else current["y2"]
-                )
-                gap = max(0, max(start, current_start) - min(end, current_end) - 1)
-                if abs(coordinate - current_coordinate) <= coordinate_tolerance and gap <= AXIS_GAP_LIMIT_PX:
-                    match = current
-                    break
-            if match is None:
-                item["source_ids"] = [str(item.pop("source_id"))]
-                merged.append(item)
-                continue
-            old_length = int(match["length_px"])
-            new_length = int(item["length_px"])
-            canonical = int(round((coordinate * new_length + int(
-                match["y1"] if orientation == "horizontal" else match["x1"]
-            ) * old_length) / max(1, old_length + new_length)))
-            combined_start = min(start, int(match["x1"] if orientation == "horizontal" else match["y1"]))
-            combined_end = max(end, int(match["x2"] if orientation == "horizontal" else match["y2"]))
-            if orientation == "horizontal":
-                match.update(x1=combined_start, x2=combined_end, y1=canonical, y2=canonical)
-            else:
-                match.update(y1=combined_start, y2=combined_end, x1=canonical, x2=canonical)
-            match["length_px"] = combined_end - combined_start + 1
-            match["max_source_deviation_px"] = max(
-                float(match["max_source_deviation_px"]), float(item["max_source_deviation_px"])
-            )
-            match["source_ids"].append(str(item["source_id"]))
-    for index, item in enumerate(merged, start=1):
-        item["id"] = f"axis-{index}"
-        item["connected"] = len(item["source_ids"]) > 1
-        item["line_width_px"] = boundary_width
-    return merged
-
-
-def normalize_large_axis_contours(
-    contours: list[np.ndarray], width: int, height: int, boundary_width: int
-) -> tuple[list[np.ndarray], list[dict[str, object]], list[dict[str, object]]]:
-    """Straighten only long, nearly axial segments belonging to large contours."""
-    minimum_length = max(80.0, min(width, height) * 0.05)
-    normalized: list[np.ndarray] = []
-    segments: list[dict[str, object]] = []
-    anomalies: list[dict[str, object]] = []
-    for contour_index, contour in enumerate(contours):
-        points = contour.reshape(-1, 2).astype(np.float64)
-        x, y, w, h = cv2.boundingRect(contour)
-        is_large = w >= width * 0.25 or h >= height * 0.25
-        x_constraints: dict[int, list[float]] = {}
-        y_constraints: dict[int, list[float]] = {}
-        candidates: list[tuple[int, int, str, float, float]] = []
-        if is_large and len(points) >= 2:
-            for point_index in range(len(points)):
-                next_index = (point_index + 1) % len(points)
-                first, second = points[point_index], points[next_index]
-                dx, dy = float(second[0] - first[0]), float(second[1] - first[1])
-                length = float(np.hypot(dx, dy))
-                orientation = _axis_orientation(dx, dy)
-                if length < minimum_length or orientation is None:
-                    continue
-                coordinate = float(np.mean([first[1], second[1]])) if orientation == "horizontal" else float(np.mean([first[0], second[0]]))
-                axis_limit = height if orientation == "horizontal" else width
-                border_guard = max(boundary_width + 2, min(width, height) * 0.01)
-                if coordinate <= border_guard or coordinate >= axis_limit - border_guard:
-                    continue
-                deviation = max(
-                    abs((first[1] if orientation == "horizontal" else first[0]) - coordinate),
-                    abs((second[1] if orientation == "horizontal" else second[0]) - coordinate),
-                )
-                if deviation > MAX_AXIS_CORRECTION_PX:
-                    anomalies.append({
-                        "type": "correction_exceeds_limit",
-                        "contour_index": contour_index,
-                        "orientation": orientation,
-                        "required_move_px": round(deviation, 3),
-                    })
-                    continue
-                constraints = y_constraints if orientation == "horizontal" else x_constraints
-                constraints.setdefault(point_index, []).append(coordinate)
-                constraints.setdefault(next_index, []).append(coordinate)
-                candidates.append((point_index, next_index, orientation, coordinate, deviation))
-
-        adjusted = points.copy()
-        for point_index, values in x_constraints.items():
-            adjusted[point_index, 0] = round(float(np.median(values)))
-        for point_index, values in y_constraints.items():
-            adjusted[point_index, 1] = round(float(np.median(values)))
-        adjusted[:, 0] = np.clip(adjusted[:, 0], 0, width - 1)
-        adjusted[:, 1] = np.clip(adjusted[:, 1], 0, height - 1)
-        normalized_contour = adjusted.round().astype(np.int32).reshape(-1, 1, 2)
-        normalized.append(normalized_contour)
-
-        for local_index, (first_index, second_index, orientation, _coordinate, deviation) in enumerate(candidates):
-            first, second = adjusted[first_index], adjusted[second_index]
-            if orientation == "horizontal":
-                coordinate = int(round(float(np.mean([first[1], second[1]]))))
-                start, end = sorted((int(round(first[0])), int(round(second[0]))))
-                segment = {"orientation": orientation, "x1": start, "y1": coordinate, "x2": end, "y2": coordinate}
-            else:
-                coordinate = int(round(float(np.mean([first[0], second[0]]))))
-                start, end = sorted((int(round(first[1])), int(round(second[1]))))
-                segment = {"orientation": orientation, "x1": coordinate, "y1": start, "x2": coordinate, "y2": end}
-            segment.update({
-                "source_id": f"c{contour_index}-s{local_index}",
-                "length_px": end - start + 1,
-                "max_source_deviation_px": round(float(deviation), 3),
-            })
-            segments.append(segment)
-    return normalized, _merge_axis_segments(segments, boundary_width), anomalies
-
-
 def convert_map(
     rgb: np.ndarray, source_name: str, boundary_width: int, tolerance: int
 ) -> tuple[np.ndarray, ConversionReport]:
@@ -370,22 +218,10 @@ def convert_map(
         epsilon = max(1.25, perimeter * 0.00085)
         useful_contours.append(cv2.approxPolyDP(contour, epsilon, True))
 
-    normalized_contours, protected_segments, boundary_anomalies = normalize_large_axis_contours(
-        useful_contours, width, height, boundary_width
-    )
     binary_gray = np.full((height, width), 255, dtype=np.uint8)
     cv2.drawContours(
-        binary_gray, normalized_contours, -1, color=0, thickness=boundary_width, lineType=cv2.LINE_8
+        binary_gray, useful_contours, -1, color=0, thickness=boundary_width, lineType=cv2.LINE_8
     )
-    for segment in protected_segments:
-        cv2.line(
-            binary_gray,
-            (int(segment["x1"]), int(segment["y1"])),
-            (int(segment["x2"]), int(segment["y2"])),
-            color=0,
-            thickness=boundary_width,
-            lineType=cv2.LINE_8,
-        )
     edge_clear = boundary_width + 1
     binary_gray[:edge_clear, :] = 255
     binary_gray[-edge_clear:, :] = 255
@@ -400,17 +236,8 @@ def convert_map(
         green_tolerance=tolerance,
         green_fraction=round(float(np.mean(green_mask > 0)), 6),
         filled_small_holes=filled_count,
-        contour_count=len(normalized_contours),
+        contour_count=len(useful_contours),
         input_was_binary=False,
-        protected_axis_segments=protected_segments,
-        boundary_regression={
-            "angle_tolerance_deg": AXIS_ANGLE_TOLERANCE_DEG,
-            "minimum_segment_length_px": round(max(80.0, min(width, height) * 0.05), 3),
-            "maximum_gap_px": AXIS_GAP_LIMIT_PX,
-            "maximum_correction_px": MAX_AXIS_CORRECTION_PX,
-            "protected_segment_count": len(protected_segments),
-            "anomalies": boundary_anomalies,
-        },
     )
     return output, report
 
@@ -538,14 +365,14 @@ HTML = r'''<!doctype html>
   'use strict';
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), stage = $('stage'), ctx = canvas.getContext('2d');
-  const state = {config:null, base:null, original:null, baseCanvas:null, compositeCanvas:null, compositeDirty:true, boundaryCheck:{fatal:[],warnings:[],repaired:0}, showOriginal:false, viewRotation:0, tool:'select', zoom:1, panX:0, panY:0, space:false, lineStart:null, linePreview:null, fillPreview:null, gapHints:[], cropPreview:false, draft:null, drag:null, selected:null, buildingTemplate:null, pastePreview:null, route:{startClick:null,start:null,goalClick:null,goal:null,path:[],status:'点击“验证全局路线”，再依次点击起点和终点。'}, annotations:{freeRects:[],obstacleRects:[],obstacleFills:[],obstacleLines:[],buildingCopies:[]}, cropRect:null, undo:[], redo:[], order:0};
+  const state = {config:null, base:null, original:null, baseCanvas:null, showOriginal:false, viewRotation:0, tool:'select', zoom:1, panX:0, panY:0, space:false, lineStart:null, linePreview:null, fillPreview:null, gapHints:[], cropPreview:false, draft:null, drag:null, selected:null, buildingTemplate:null, pastePreview:null, route:{startClick:null,start:null,goalClick:null,goal:null,path:[],status:'点击“验证全局路线”，再依次点击起点和终点。'}, annotations:{freeRects:[],obstacleRects:[],obstacleFills:[],obstacleLines:[],buildingCopies:[]}, cropRect:null, undo:[], redo:[], order:0};
   const labels = {select:'选择编辑',pan:'平移',free:'画可行区',obstacle:'矩形障碍区',fill:'点击填充障碍区',line:'画障碍线',crop:'裁剪保留框',copyBuilding:'框选复制楼栋',pasteBuilding:'粘贴楼栋',route:'验证全局路线'};
   const hints = {select:'点击标注进行选择；拖动标注可移动。',pan:'拖动画面；滚轮缩放。',free:'在地图上拖出矩形，白色区域会覆盖底图。',obstacle:'在地图上拖出矩形，区域将保存为黑色。',fill:'点击封闭白区进行预览；若有 1–8 px 小缺口，会以橙色标出。',line:'依次点击起点和终点；橙色标记存在时，请在标记处补线。Esc 可取消。',crop:'拖出要保留的矩形；导出时框外区域会被裁掉。',copyBuilding:'拖出要复制的矩形；框内当前二值内容会按所选范围原样复制。',pasteBuilding:'移动鼠标预览，单击放置楼栋；可连续粘贴。',route:'依次点击起点和终点，自动规划当前实时地图上的全局路线。'};
   const clone = value => JSON.parse(JSON.stringify(value));
   const patchCache = new Map();
   const snapshot = () => ({annotations:clone(state.annotations),cropRect:clone(state.cropRect),order:state.order});
-  const restore = snap => {state.annotations=clone(snap.annotations);state.cropRect=clone(snap.cropRect);state.cropPreview=false;state.order=snap.order;state.selected=null;state.lineStart=null;state.linePreview=null;state.fillPreview=null;state.gapHints=[];state.compositeDirty=true;invalidateRoute();updateUI();render();};
-  function pushUndo(){invalidateRoute();state.compositeDirty=true;state.undo.push(snapshot());if(state.undo.length>100)state.undo.shift();state.redo=[];}
+  const restore = snap => {state.annotations=clone(snap.annotations);state.cropRect=clone(snap.cropRect);state.cropPreview=false;state.order=snap.order;state.selected=null;state.lineStart=null;state.linePreview=null;state.fillPreview=null;state.gapHints=[];invalidateRoute();updateUI();render();};
+  function pushUndo(){invalidateRoute();state.undo.push(snapshot());if(state.undo.length>100)state.undo.shift();state.redo=[];}
   function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),2200);}
   function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
   function orthogonalEnabled(){return $('orthogonalLines').checked;}
@@ -566,7 +393,7 @@ HTML = r'''<!doctype html>
   function buildingWorldPoints(item){return item.points.map(p=>buildingLocalToWorld(item,p));}
   function buildingBounds(item){const pts=buildingWorldPoints(item),xs=pts.map(p=>p.x),ys=pts.map(p=>p.y);return {x:Math.min(...xs),y:Math.min(...ys),width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)};}
   function polygonPath(target,points){target.beginPath();target.moveTo(points[0].x,points[0].y);for(let i=1;i<points.length;i++)target.lineTo(points[i].x,points[i].y);target.closePath();}
-  function patchEntry(data){if(!data)return null;if(patchCache.has(data))return patchCache.get(data);const image=new Image(),entry={source:image,ready:false,promise:null};entry.promise=new Promise((resolve,reject)=>{image.onload=()=>{entry.ready=true;state.compositeDirty=true;render();resolve(image);};image.onerror=()=>reject(new Error('楼栋复制图块加载失败'));});image.src=data;patchCache.set(data,entry);return entry;}
+  function patchEntry(data){if(!data)return null;if(patchCache.has(data))return patchCache.get(data);const image=new Image(),entry={source:image,ready:false,promise:null};entry.promise=new Promise((resolve,reject)=>{image.onload=()=>{entry.ready=true;render();resolve(image);};image.onerror=()=>reject(new Error('楼栋复制图块加载失败'));});image.src=data;patchCache.set(data,entry);return entry;}
   function cachePatch(data,source){patchCache.set(data,{source,ready:true,promise:Promise.resolve(source)});}
   async function preloadBuildingPatches(){const entries=state.annotations.buildingCopies.filter(item=>item.patchData).map(item=>patchEntry(item.patchData));await Promise.all(entries.map(entry=>entry.promise));}
   function paintBuilding(target,item,preview=false){const points=buildingWorldPoints(item);if(points.length<3)return;target.save();target.globalAlpha=preview?.55:1;if(item.patchData){const entry=patchEntry(item.patchData),bounds=buildingBounds(item);target.imageSmoothingEnabled=false;if(entry?.ready)target.drawImage(entry.source,bounds.x,bounds.y,bounds.width,bounds.height);if(preview){target.strokeStyle='#2f80ff';target.lineWidth=2/state.zoom;target.setLineDash([8/state.zoom,5/state.zoom]);target.strokeRect(bounds.x,bounds.y,bounds.width,bounds.height);}target.restore();return;}target.fillStyle='#fff';target.strokeStyle=preview?'#2f80ff':'#000';target.lineWidth=Math.max(1,Number(item.lineWidth)||3);target.lineJoin='round';polygonPath(target,points);target.fill();target.stroke();const children=Array.isArray(item.children)?[...item.children].sort((a,b)=>(a.drawOrder||0)-(b.drawOrder||0)):[];for(const child of children){if(child.type==='line'){const a=buildingLocalToWorld(item,{x:child.x1,y:child.y1}),b=buildingLocalToWorld(item,{x:child.x2,y:child.y2});target.strokeStyle=preview?'#2f80ff':'#000';target.lineWidth=Math.max(1,(Number(child.widthPx)||3)*((Math.abs(item.scaleX||1)+Math.abs(item.scaleY||1))/2));target.lineCap='round';target.beginPath();target.moveTo(a.x,a.y);target.lineTo(b.x,b.y);target.stroke();}else{const corners=[{x:child.x,y:child.y},{x:child.x+child.width,y:child.y},{x:child.x+child.width,y:child.y+child.height},{x:child.x,y:child.y+child.height}].map(p=>buildingLocalToWorld(item,p));target.fillStyle=child.type==='free'?'#fff':'#000';polygonPath(target,corners);target.fill();}}target.restore();}
@@ -669,8 +496,11 @@ HTML = r'''<!doctype html>
   function handleRouteClick(point){const grid=buildPlanningGrid();if(!state.route.startClick||state.route.goalClick){const start=nearestPlanningPoint(point,grid);if(!start){state.route.status='起点附近 40 px 内没有可行区域，请重新选择。';updatePlannerUI();toast('起点不在可行区域附近');return;}state.route={startClick:{x:point.x,y:point.y},start,goalClick:null,goal:null,path:[],status:`起点已设置 (${Math.round(start.x)}, ${Math.round(start.y)})，请点击终点。`};updatePlannerUI();render();return;}const start=nearestPlanningPoint(state.route.startClick,grid),goal=nearestPlanningPoint(point,grid);if(!start||!goal){state.route.goalClick=null;state.route.goal=null;state.route.path=[];state.route.status='终点附近 40 px 内没有可行区域，请重新选择终点。';updatePlannerUI();toast('终点不在可行区域附近');render();return;}state.route.start=start;state.route.goalClick={x:point.x,y:point.y};state.route.goal=goal;state.route.status='正在规划当前实时地图…';updatePlannerUI();render();const path=planAStar(grid,start,goal);state.route.path=path;if(path.length){const snapped=start.snapped||goal.snapped?'；起点或终点已吸附到最近白区':'';state.route.status=`规划成功：本次路线连通，编辑验证 OK；路径约 ${Math.round(routeDistance(path))} px，安全边距 ${grid.clearance} px${snapped}`;toast('规划成功：本次路线编辑验证 OK');}else{state.route.status=`规划失败：本次起点与终点不连通；请检查障碍线和可行区，安全边距 ${grid.clearance} px。`;toast('规划失败：本次路线不连通');}updatePlannerUI();render();}
   function drawRoute(target){const route=state.route,path=route.path;if(path.length){target.save();target.lineCap='round';target.lineJoin='round';target.strokeStyle='#00131a';target.lineWidth=10/state.zoom;target.beginPath();target.moveTo(path[0].x,path[0].y);for(let i=1;i<path.length;i++)target.lineTo(path[i].x,path[i].y);target.stroke();target.strokeStyle='#00d9ff';target.lineWidth=5/state.zoom;target.stroke();let travelled=0,nextArrow=90/state.zoom;for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i],length=Math.hypot(b.x-a.x,b.y-a.y);while(length&&travelled+length>=nextArrow){const ratio=(nextArrow-travelled)/length,x=a.x+(b.x-a.x)*ratio,y=a.y+(b.y-a.y)*ratio,angle=Math.atan2(b.y-a.y,b.x-a.x),size=9/state.zoom;target.fillStyle='#00d9ff';target.beginPath();target.moveTo(x+Math.cos(angle)*size,y+Math.sin(angle)*size);target.lineTo(x+Math.cos(angle+2.55)*size,y+Math.sin(angle+2.55)*size);target.lineTo(x+Math.cos(angle-2.55)*size,y+Math.sin(angle-2.55)*size);target.closePath();target.fill();nextArrow+=90/state.zoom;}travelled+=length;}target.restore();}const marker=(point,color,label)=>{if(!point)return;target.save();target.fillStyle=color;target.strokeStyle='#fff';target.lineWidth=3/state.zoom;target.beginPath();target.arc(point.x,point.y,10/state.zoom,0,Math.PI*2);target.fill();target.stroke();target.fillStyle='#fff';target.font=`bold ${12/state.zoom}px sans-serif`;target.textAlign='center';target.textBaseline='middle';target.fillText(label,point.x,point.y);target.restore();};marker(route.start,'#14a85b','起');marker(route.goal,'#e5484d','终');}
   function drawGapHints(target){target.save();target.strokeStyle='#ff9f1c';target.fillStyle='#ff9f1c';target.lineWidth=3/state.zoom;target.font=`bold ${12/state.zoom}px sans-serif`;target.textAlign='center';target.textBaseline='middle';for(let index=0;index<state.gapHints.length;index++){const hint=state.gapHints[index],radius=15/state.zoom,cross=8/state.zoom;target.beginPath();target.arc(hint.x,hint.y,radius,0,Math.PI*2);target.stroke();target.beginPath();target.moveTo(hint.x-cross,hint.y);target.lineTo(hint.x+cross,hint.y);target.moveTo(hint.x,hint.y-cross);target.lineTo(hint.x,hint.y+cross);target.stroke();target.fillText(String(index+1),hint.x,hint.y-radius-8/state.zoom);}target.restore();}
-  function drawMapContent(target){
-    target.imageSmoothingEnabled=false;target.drawImage(state.base,0,0);
+  function drawScene(target, offsetX=0, offsetY=0, includeGuides=true){
+    target.save();target.translate(-offsetX,-offsetY);target.imageSmoothingEnabled=false;
+    if(includeGuides&&state.cropPreview&&state.cropRect){const c=state.cropRect;target.beginPath();target.rect(c.x,c.y,c.width,c.height);target.clip();}
+    target.drawImage(state.showOriginal?state.original:state.base,0,0);
+    if(state.showOriginal){target.restore();return;}
     for(const layer of allItems()){
       const item=layer.item;target.save();
       if(layer.type==='line'){target.strokeStyle='#000';target.lineWidth=Math.max(1,item.widthPx);target.lineCap='round';target.beginPath();target.moveTo(item.x1,item.y1);target.lineTo(item.x2,item.y2);target.stroke();}
@@ -679,33 +509,6 @@ HTML = r'''<!doctype html>
       else{target.fillStyle=layer.type==='free'?'#fff':'#000';target.fillRect(item.x,item.y,item.width,item.height);}
       target.restore();
     }
-  }
-  function normalizeProtectedBoundaries(target,width,height){
-    const segments=Array.isArray(state.config.report?.protected_axis_segments)?state.config.report.protected_axis_segments:[],reported=Array.isArray(state.config.report?.boundary_regression?.anomalies)?state.config.report.boundary_regression.anomalies:[],fatal=reported.map(item=>({id:'conversion',x:0,y:0,reason:item.type||'转换阶段边界异常'})),warnings=[];let repaired=0;
-    forceBinary(target,width,height);
-    for(const segment of segments){
-      const horizontal=segment.orientation==='horizontal',x1=Math.round(Number(segment.x1)),y1=Math.round(Number(segment.y1)),x2=Math.round(Number(segment.x2)),y2=Math.round(Number(segment.y2)),lineWidth=clamp(Math.round(Number(segment.line_width_px)||3),1,32),deviation=Number(segment.max_source_deviation_px)||0;
-      if((horizontal&&y1!==y2)||(!horizontal&&x1!==x2)){fatal.push({id:segment.id,x:x1,y:y1,reason:'受保护边界不是严格水平或垂直'});continue;}
-      if(deviation>32){fatal.push({id:segment.id,x:x1,y:y1,reason:'校正位移超过 32 px'});continue;}
-      const start=horizontal?Math.min(x1,x2):Math.min(y1,y2),end=horizontal?Math.max(x1,x2):Math.max(y1,y2),axis=horizontal?y1:x1,corridor=clamp(Math.ceil(deviation)+lineWidth+2,6,32),sampleOffset=Math.min(32,corridor+3),image=target.getImageData(0,0,width,height),pixels=image.data;
-      let sideA=0,sideB=0,samples=0;const sampleStep=Math.max(1,Math.floor((end-start+1)/700));
-      for(let value=start;value<=end;value+=sampleStep){const ax=horizontal?value:axis-sampleOffset,ay=horizontal?axis-sampleOffset:value,bx=horizontal?value:axis+sampleOffset,by=horizontal?axis+sampleOffset:value;if(ax<0||ay<0||bx<0||by<0||ax>=width||bx>=width||ay>=height||by>=height)continue;samples++;if(pixels[(ay*width+ax)*4]<128)sideA++;if(pixels[(by*width+bx)*4]<128)sideB++;}
-      const fractionA=samples?sideA/samples:0,fractionB=samples?sideB/samples:0,blackA=fractionA>.55&&fractionB<.28,blackB=fractionB>.55&&fractionA<.28;
-      if(blackA||blackB){target.save();target.fillStyle='#fff';target.beginPath();if(horizontal){const left=start,right=end+1;if(blackA){target.fillRect(left,axis+Math.ceil(lineWidth/2),right-left,corridor);}else{target.fillRect(left,axis-corridor,right-left,corridor-Math.floor(lineWidth/2));}}else{const top=start,bottom=end+1;if(blackA){target.fillRect(axis+Math.ceil(lineWidth/2),top,corridor,bottom-top);}else{target.fillRect(axis-corridor,top,corridor-Math.floor(lineWidth/2),bottom-top);}}target.fillStyle='#000';if(horizontal){if(blackA)target.fillRect(start,axis-corridor,end-start+1,corridor+Math.ceil(lineWidth/2));else target.fillRect(start,axis-Math.floor(lineWidth/2),end-start+1,corridor+Math.floor(lineWidth/2)+1);}else{if(blackA)target.fillRect(axis-corridor,start,corridor+Math.ceil(lineWidth/2),end-start+1);else target.fillRect(axis-Math.floor(lineWidth/2),start,corridor+Math.floor(lineWidth/2)+1,end-start+1);}target.restore();repaired++;}
-      else if(Math.max(fractionA,fractionB)>.35){warnings.push({id:segment.id,x:x1,y:y1,reason:'边界两侧黑白方向不够稳定，仅恢复中心线'});}
-      target.save();target.fillStyle='#000';if(horizontal)target.fillRect(Math.min(x1,x2),axis-Math.floor(lineWidth/2),Math.abs(x2-x1)+1,lineWidth);else target.fillRect(axis-Math.floor(lineWidth/2),Math.min(y1,y2),lineWidth,Math.abs(y2-y1)+1);target.restore();
-    }
-    forceBinary(target,width,height);state.boundaryCheck={fatal,warnings,repaired};
-  }
-  function buildComposite(){
-    if(state.compositeCanvas&&!state.compositeDirty)return state.compositeCanvas;
-    const surface=state.compositeCanvas||document.createElement('canvas');surface.width=state.config.width;surface.height=state.config.height;const target=surface.getContext('2d',{willReadFrequently:true});target.clearRect(0,0,surface.width,surface.height);drawMapContent(target);normalizeProtectedBoundaries(target,surface.width,surface.height);state.compositeCanvas=surface;state.compositeDirty=false;return surface;
-  }
-  function drawScene(target, offsetX=0, offsetY=0, includeGuides=true){
-    target.save();target.translate(-offsetX,-offsetY);target.imageSmoothingEnabled=false;
-    if(includeGuides&&state.cropPreview&&state.cropRect){const c=state.cropRect;target.beginPath();target.rect(c.x,c.y,c.width,c.height);target.clip();}
-    target.drawImage(state.showOriginal?state.original:buildComposite(),0,0);
-    if(state.showOriginal){target.restore();return;}
     if(includeGuides){
       if(state.fillPreview)paintObstacleFill(target,state.fillPreview,'#ef4444',.58);
       if(state.gapHints.length)drawGapHints(target);
@@ -752,10 +555,8 @@ HTML = r'''<!doctype html>
   function exportedAnnotations(c){if(!c)return clone(state.annotations);return {freeRects:state.annotations.freeRects.map(r=>clipRect(r,c)).filter(Boolean),obstacleRects:state.annotations.obstacleRects.map(r=>clipRect(r,c)).filter(Boolean),obstacleFills:state.annotations.obstacleFills.map(item=>clipFill(item,c)).filter(Boolean),obstacleLines:state.annotations.obstacleLines.map(r=>clipLine(r,c)).filter(Boolean),buildingCopies:state.annotations.buildingCopies.filter(item=>buildingIntersectsCrop(item,c)).map(item=>({...clone(item),x:item.x-c.x,y:item.y-c.y}))};}
   function download(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}
   function forceBinary(context,width,height){const image=context.getImageData(0,0,width,height),pixels=image.data;for(let i=0;i<pixels.length;i+=4){const value=pixels[i]+pixels[i+1]+pixels[i+2]<384?0:255;pixels[i]=value;pixels[i+1]=value;pixels[i+2]=value;pixels[i+3]=255;}context.putImageData(image,0,0);}
-  function canvasBlob(surface){return new Promise((resolve,reject)=>surface.toBlob(blob=>blob?resolve(blob):reject(new Error('PNG 编码失败')),'image/png'));}
-  async function sha256(blob){const digest=await crypto.subtle.digest('SHA-256',await blob.arrayBuffer());return [...new Uint8Array(digest)].map(value=>value.toString(16).padStart(2,'0')).join('');}
   async function saveLocalProject(data){const response=await fetch('/project.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(!response.ok){let message='HTTP '+response.status;try{message=(await response.json()).error||message;}catch{}throw new Error(message);}}
-  async function exportAll(){try{await preloadBuildingPatches();state.compositeDirty=true;}catch(err){alert('导出失败：'+err.message);return;}const c=state.cropRect||{x:0,y:0,width:state.config.width,height:state.config.height},full=buildComposite();if(state.boundaryCheck.fatal.length){state.gapHints=state.boundaryCheck.fatal.filter(item=>Number.isFinite(item.x)&&Number.isFinite(item.y)).map(item=>({x:item.x,y:item.y,radius:0,width:1,height:1,count:1}));updateGapStatus();render();alert('导出已阻止：受保护道路边界存在无法可靠校正的异常。请查看橙色标记或转换报告。');return;}const out=document.createElement('canvas');out.width=c.width;out.height=c.height;const octx=out.getContext('2d');octx.imageSmoothingEnabled=false;octx.drawImage(full,c.x,c.y,c.width,c.height,0,0,c.width,c.height);forceBinary(octx,out.width,out.height);const blob=await canvasBlob(out),fingerprint=await sha256(blob),data={version:'gaode-binary-map-editor-v2',exportedAt:new Date().toISOString(),source:{name:state.config.sourceName,width:state.config.width,height:state.config.height},preprocessing:state.config.report,project:{cropRect:clone(state.cropRect),annotations:clone(state.annotations)},render:{sha256:fingerprint,compositeSource:'shared-full-resolution-canvas',pixelScale:1,boundaryCheck:clone(state.boundaryCheck)},exported:{width:c.width,height:c.height,offsetX:c.x,offsetY:c.y,annotations:exportedAnnotations(c)}};try{await saveLocalProject(data);}catch(err){alert('导出前保存本地工程失败：'+err.message);return;}if(state.cropRect){state.cropPreview=true;fitCrop();updateUI();}const stem=state.config.stem;download(blob,stem+'_binary.png');setTimeout(()=>download(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),stem+'_annotations.json'),250);toast(state.cropRect?'已导出；当前显示裁剪结果':'已导出并保存本地工程');}
+  async function exportAll(){try{await preloadBuildingPatches();}catch(err){alert('导出失败：'+err.message);return;}const c=state.cropRect||{x:0,y:0,width:state.config.width,height:state.config.height};const full=document.createElement('canvas');full.width=state.config.width;full.height=state.config.height;const fctx=full.getContext('2d');const old=state.showOriginal;state.showOriginal=false;drawScene(fctx,0,0,false);state.showOriginal=old;const out=document.createElement('canvas');out.width=c.width;out.height=c.height;const octx=out.getContext('2d');octx.imageSmoothingEnabled=false;octx.drawImage(full,c.x,c.y,c.width,c.height,0,0,c.width,c.height);forceBinary(octx,out.width,out.height);const data={version:'gaode-binary-map-editor-v2',exportedAt:new Date().toISOString(),source:{name:state.config.sourceName,width:state.config.width,height:state.config.height},preprocessing:state.config.report,project:{cropRect:clone(state.cropRect),annotations:clone(state.annotations)},exported:{width:c.width,height:c.height,offsetX:c.x,offsetY:c.y,annotations:exportedAnnotations(c)}};try{await saveLocalProject(data);}catch(err){alert('导出前保存本地工程失败：'+err.message);return;}if(state.cropRect){state.cropPreview=true;fitCrop();updateUI();}const stem=state.config.stem;out.toBlob(blob=>{download(blob,stem+'_binary.png');setTimeout(()=>download(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),stem+'_annotations.json'),250);toast(state.cropRect?'已导出；当前显示裁剪结果':'已导出并保存本地工程');},'image/png');}
   async function importJson(file){if(state.showOriginal){toast('当前为原图预览，请切回二值图后导入');return;}try{const data=JSON.parse(await file.text());if(data.source&&((Number(data.source.width)!==state.config.width)||(Number(data.source.height)!==state.config.height)))throw new Error('JSON 的原图尺寸与当前图片不一致');const annotations=data.project?.annotations||data.annotations;if(!annotations)throw new Error('JSON 中没有可编辑标注');pushUndo();state.annotations={freeRects:Array.isArray(annotations.freeRects)?annotations.freeRects:[],obstacleRects:Array.isArray(annotations.obstacleRects)?annotations.obstacleRects:[],obstacleFills:Array.isArray(annotations.obstacleFills)?annotations.obstacleFills:[],obstacleLines:Array.isArray(annotations.obstacleLines)?annotations.obstacleLines:[],buildingCopies:Array.isArray(annotations.buildingCopies)?annotations.buildingCopies:[]};state.cropRect=data.project?.cropRect||data.cropRect||null;state.cropPreview=false;state.order=Math.max(0,...allItems().map(x=>Number(x.item.drawOrder)||0));state.selected=null;state.fillPreview=null;state.gapHints=[];await preloadBuildingPatches();updateUI();toast('标注 JSON 已导入');}catch(err){alert('导入失败：'+err.message);}}
   function loadImage(src){return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(new Error('图片加载失败'));image.src=src+'?v='+Date.now();});}
   async function init(){state.config=await fetch('/config.json').then(r=>r.json());[state.base,state.original]=await Promise.all([loadImage('/base.png'),loadImage('/original.png')]);state.baseCanvas=document.createElement('canvas');state.baseCanvas.width=state.config.width;state.baseCanvas.height=state.config.height;const bctx=state.baseCanvas.getContext('2d',{willReadFrequently:true});bctx.imageSmoothingEnabled=false;bctx.drawImage(state.base,0,0);$('sourceText').textContent=`${state.config.sourceName} · ${state.config.width}×${state.config.height}px · 自动轮廓 ${state.config.report.contour_count} 条`;$('lineWidth').value=state.config.defaultLineWidth;const saved=await fetch('/project.json',{cache:'no-store'}).then(r=>r.ok?r.json():null);if(saved?.project?.annotations&&Number(saved.source?.width)===state.config.width&&Number(saved.source?.height)===state.config.height){const annotations=saved.project.annotations;state.annotations={freeRects:Array.isArray(annotations.freeRects)?annotations.freeRects:[],obstacleRects:Array.isArray(annotations.obstacleRects)?annotations.obstacleRects:[],obstacleFills:Array.isArray(annotations.obstacleFills)?annotations.obstacleFills:[],obstacleLines:Array.isArray(annotations.obstacleLines)?annotations.obstacleLines:[],buildingCopies:Array.isArray(annotations.buildingCopies)?annotations.buildingCopies:[]};state.cropRect=saved.project.cropRect||null;state.order=Math.max(0,...allItems().map(x=>Number(x.item.drawOrder)||0));await preloadBuildingPatches();toast('已自动恢复上次导出的工程');}resize();fit();updateUI();}

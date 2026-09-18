@@ -6,15 +6,8 @@
   "map": "map.png",
   "annotations": "annotations.json",
   "editorFormat": "gaode-binary-map-editor-v2",
-  "width": 2113,
-  "height": 1521,
+  "width": 2192,
+  "height": 1642,
   "colorMode": "binary-0-255",
-  "boundaryNormalization": {
-    "protectedAxisSegments": true,
-    "angleToleranceDeg": 2,
-    "maximumConnectedGapPx": 8,
-    "maximumCorrectionPx": 32
-  },
-  "sha256": "a1bd270b16aa009f8011a3a4bd0f45bedb1f1742b311c4759c386f29ac5fb9ee",
   "nav2Ready": false
 }
