@@ -1,6 +1,6 @@
 # dushiyuan-1
 
-这是 `dushiyuan-1` 小区当前人工确认、可继续编辑的高德截图二值地图。
+这是 `dushiyuan-1` 小区当前人工确认、可继续编辑的高德截图二值地图。当前正式版以本地编辑工程为准，已裁剪为 `2113 × 1521`，在原图中的偏移为 `(18, 0)`。
 
 ## 文件
 
@@ -9,7 +9,7 @@
 - [`maps/final/annotations.json`](maps/final/annotations.json)：可重新导入编辑器的完整标注工程。
 - [`maps/final/meta.json`](maps/final/meta.json)：版本角色和尺寸说明。
 
-`final/` 表示当前人工确认版本，不是不可修改版本。以后完成修改后，使用新的 `map.png` 和 `annotations.json` 覆盖同名文件，再人工执行 Git 提交和推送。
+`final/` 表示当前人工确认版本，不是不可修改版本。以后完成修改后，使用新的 `map.png` 和 `annotations.json` 覆盖同名文件，再人工执行 Git 提交和推送；GitHub 不会自动覆盖本地编辑工程。
 
 ## 在 macOS 上继续编辑
 

@@ -1,13 +1,21 @@
 {
   "communityId": "dushiyuan-1",
   "status": "final",
-  "description": "Current human-confirmed editable Gaode screenshot binary map",
+  "description": "Current local-first human-confirmed editable Gaode screenshot binary map",
   "source": "../../raw_inputs/source.jpeg",
   "map": "map.png",
   "annotations": "annotations.json",
   "editorFormat": "gaode-binary-map-editor-v2",
-  "width": 2192,
-  "height": 1642,
+  "width": 2113,
+  "height": 1521,
+  "sourceWidth": 2192,
+  "sourceHeight": 1642,
+  "crop": {
+    "x": 18,
+    "y": 0,
+    "width": 2113,
+    "height": 1521
+  },
   "colorMode": "binary-0-255",
   "nav2Ready": false
 }
